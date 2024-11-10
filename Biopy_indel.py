@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-
-# Test Change
 from loguru import logger
 import re
 import sys
@@ -12,6 +9,7 @@ from math import floor
 from statistics import median
 import csv
 import pandas as pd
+from pathlib import Path
 
 
 # import pysam
@@ -24,31 +22,35 @@ from io import StringIO
 
 
 
-def main(params_dict, ampData, seqList, base_filename, IndelDF):
 
 
+def main(ampData, seqList, base_filename, filename, output_file1, output_file2):
+    '''
+    Takes Parameter DF data, list of seqs, directory name, name of sample sequence file, and both initialized outputfiles
+
+    '''
     #Extracting Amplicon Data
-    seqRefUsed = params_dict['seqRefUsed']  # Index for the row we want to use
-    Local_ID = ampData.iloc[seqRefUsed]["Identifier"]
-    chr = ampData.iloc[seqRefUsed]["Chromosome"]
-    Gene = ampData.iloc[seqRefUsed]["Gene"]
-    Global_bp = ampData.iloc[seqRefUsed]["Position"]
-    Ref_Seq = ampData.iloc[seqRefUsed]["Sequence"]
+
+    chr = ampData["chr"].values[0] #Used in output
+    Gene = ampData["gene"].values[0] #Used in output
+    Amp_ID = ampData["amp_id"].values[0] #Used in output
+    Global_bp = ampData["hg19s"].values[0] #Used in output
+    Ref_Seq = ampData["ref_seq"].values[0] #Used in output and then later alignment
 
 
 
     #Extracting Parameters
-    cutoff = params_dict['cutoff']
-    DelLenCut = params_dict['DelLenCut']
-    InsertMax = params_dict['InsertMax']
-    Deletion = params_dict['Deletion']
-    exclusion = params_dict['exclusion_threshold']
-    gap_open = params_dict['nwalign_gap_open']
-    gap_extend = params_dict['nwalign_gap_extend']
-    
+    Cutoff = ampData['cutoff'].values[0] #Used in alignment
+    DelLenCut = ampData['DelLenCut'].values[0] #Used in alignment
+    InsertMax = ampData['InsertMax'].values[0] #Used in alignment
+    Deletion = ampData['Deletion'].values[0] #Used in alignment
+    exclusion = ampData['exclusion'].values[0] #Used in ConsensusInDel, Set exclusion threshold (e.g., exclude groups with less than 5% of total sequences)
+    gap_open = ampData['gap_open'].values[0] #Used in alignment
+    gap_extend = ampData['gap_extend'].values[0] #Used in alignment
+    status = "Deletion" if Deletion else "Insertion" #Used in to tell Alignfunc which to run and output
     param = {
-        "nwalign_gap_open": gap_open,  # Currently -18, -40 was new, non-positive; default -20; -1 to -180 same alignment
-        "nwalign_gap_extend": gap_extend,  # Currently -.6, -.6 was new, non-positive; default -0.6;  same alignment -19.9 to -0.001; less than gap_open
+        "nwalign_gap_open": gap_open,  # Currently -18, non-positive; default -20;
+        "nwalign_gap_extend": gap_extend,  # Currently -.6, non-positive; default -0.6;
         "swalign_a": -8,
         "swalign_b": "nuc44m",
         "bamPattern": "shrimp2outARsorted.bam",
@@ -60,120 +62,176 @@ def main(params_dict, ampData, seqList, base_filename, IndelDF):
 
 
     # Scoring data file from ftp://ftp.ncbi.nih.gov/blast/matrices/
+    # Not matlab uses nuc44 for 'nt' type alphabets
     # scoringdatafile=os.getenv('FLT3ITD_scoringMatrix')
 
-    scoringdatafile = params_dict['scoringMatrix']
+    #Change for address of NUC.4.4
+    scoringdatafile = base_filename / "data" / ampData['scoringdatafile'].values[0] #NEEDS TO BE CHANGED TO THE CORRECT FILE PATH
 
-    seqs = seqList
-    DelList = [] 
-    IndexList = []
+    seqs = seqList #Used in alignment
+    DelList = [] #VERY IMPORTANT, this is where all InDels are stored
+    IndexList = [] #VERY IMPORTANT, this is where all Indexes are stored for each InDel, indexes do not account for gap spaces being present
     current_date = datetime.today().strftime('%Y-%m-%d')
     logger.debug(f"Results: {current_date}\n")
-    script_name = os.path.realpath(__file__)
-    logger.debug(f"script: {script_name}")
 
     nuc44 = load_scoring_matrice(scoringdatafile)
     # print(nuc44)
 
     
-    seqRef = Ref_Seq
+    seqRef = Ref_Seq # Format used in alignment
     # Add in function to collect and then loop through more Reference sequences, currently hard coded in
 
-    Cutoff = cutoff
-    exclusion_threshold = exclusion  # Set exclusion threshold (e.g., exclude groups with less than 5% of total sequences)
-    logger.info(f"Exclusion Threshold used: {exclusion_threshold * 100}%")
+    logger.info(f"Exclusion Threshold used: {exclusion * 100}%")
 
     for i in range(len(seqs)):  # Loops through all of the sample sequences, for each Reference sequence
-        seqDel = seqs[i]
-        firstIndex, DeletionSeq = AlignFunc(nuc44, seqRef, seqDel, DelList, Deletion, param, DelLenCut, InsertMax)
+        seqInDel = seqs[i]
+        firstIndex, DeletionSeq = AlignFunc(nuc44, seqRef, seqInDel, DelList, Deletion, param, DelLenCut, InsertMax, output_file2)
         IndexList.append(firstIndex)
 
     # significant_lengths, ConSeq, FinalConSeq, MSAscore, DeletionPoints = ConcensusDel(DelList, Cutoff, exclusion_threshold)  # Creates consensus seq
-    significant_lengths, ConSeq, AverageIndexLength = ConcensusInDel(DelList, Cutoff, exclusion_threshold)  # Creates consensus seq
-
+    significant_lengths, ConSeq, AverageIndexLength = ConcensusInDel(DelList, Cutoff, exclusion)  # Creates consensus seq
+    if significant_lengths == 0:
+        newIndelDF = pd.DataFrame({
+                'Seqs': filename,  # Make single values a list to match the expected structure
+                'Date': current_date,
+                'Min_Length': DelLenCut,
+                'Max_Length': InsertMax,
+                "gap_open": gap_open,
+                "gap_extend": gap_extend,
+                "Exclusion_Threshild": f"{exclusion * 100}%",
+                "Gene": Gene,
+                "Amp_ID": Amp_ID,
+                "Chromosome": chr,
+                "Global_Location": Global_bp,
+                "Reference_seq": Ref_Seq,
+                "Num_InDels": [0],
+                "Num_seqs": len(seqs),
+                "Con_Seq_Lengths": [0],  # The current length
+                "Con_Seq_Counts": [0],  # The count of this specific length
+                "VAF": [0], # VAF for all InDels Detected
+                "Con_Seq": [0],  # The consensus sequence without the first character
+                "Con_Seq_Index": [0],  # The insertion index for the consensus sequence
+                "Con_Seq_bp": [0],  # The bp (first character) for this consensus sequence
+                "Con_Seq_VAF": [0],  # VAF for the consensus
+                "Con_Seq_QS": [0],  # Quality Score for the consensus sequence
+            })
+        with open(output_file1, 'a') as f:
+            f.write("No Significant Sequences found\n")
+        return newIndelDF
 
     VAF = round((len(DelList) / len(seqs)) * 100, 2)
-    logger.info(f"Number of sequences containing duplications: {DupCounter}")
+    
 
     logger.info("Consensus Sequences (Length, Count, Sequence):")
     for length, count in significant_lengths.items():
         logger.info(f"Length: {length}, Count: {count}, Insertion Sequence: {ConSeq[length][0]}, at Index: {round(ConSeq[length][1])}, QS = {ConSeq[length][2]}")
 
 
+    # Calculates the average starting index value from only the sequences used to calculate the consensus sequences
+    #TrueIndex = round(int(Amp_Data[seqRefUsed][2]) + avg_first_index)
+
     logger.info(f"Reference Sequence Used: {Gene}, {chr}, {Global_bp}, {Ref_Seq}")
     logger.info(f"Sample Data Used: {filename}")
     logger.info(f"Number of Deletions/Insertions Found: {len(DelList)} from number of sequences: {len(seqs)}")
     logger.info(f"Average Index for each Length, starting from most common: {AverageIndexLength}")
     logger.info(f"VAF: {VAF}%")
-    print(params_dict)
     # logger.info(f"Final Consensus Sequence with leading Insertion Point included: {FinalConSeq}")
     # logger.info(f"Avg Insertion Index from Clustered Sequences: {avg_first_index}")
     # logger.info(f"Final Insertion Point: {TrueIndex}")
     # logger.info(f"Final Score: {MSAscore}")
 
     #Use Pathlib
-    output_folder = str(d_output)
-    output_file = os.path.join(output_folder, f"{base_filename}_Ref-{Local_ID}_Out.txt")
-    logger.info(output_file)
-    if Deletion == True:
-        status = "Deletion"
-    else:
-        status = "Insertion"
+    
+    logger.info(output_file1)
 
 
-
-    with open(output_file, 'w') as f:
-        f.write(f"File Ran: {os.path.basename(__file__)} as a {status} run\n")
+    with open(output_file1, 'a') as f: #Output Summary File
+        f.write(f"{status} run\n")
         f.write(f"Results: {current_date}\n")
         f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Alignment Parameters: {param}\n")
-        f.write(f"Exclusion Threshold used: {exclusion_threshold * 100}%\n")
+        f.write(f"Exclusion Threshold used: {exclusion * 100}%\n")
         f.write(f"Reference Sequence Used: {Gene}, {chr}, {Global_bp}, {Ref_Seq}\n")
         f.write(f"Sample Data Used: {filename}\n")
         f.write(f"Number of Deletions/Insertions Found: {len(DelList)} from number of sequences: {len(seqs)}\n")
         f.write(f"VAF: {VAF}%\n")
         
-        f.write(f"The Insertion/Deletion Sequences:\n")
+        f.write(f"The InDel Sequences:\n")
         for length, count in significant_lengths.items():
-            f.write(f"Length: {length-1}, Count: {count}, Insertion Sequence: {ConSeq[length][0][1:]}\nAt Index: {round(ConSeq[length][1])} at bp: {ConSeq[length][0][0]}, VAF = {round((count/len(seqs))*100, 3)}%, Quality Score: {round((ConSeq[length][2])*100, 3)}% similar.\n")
-    
+            f.write(f"Length: {length-1}, Count: {count}, InDel Sequence: {ConSeq[length][0][1:]}\nAt Index: {round(ConSeq[length][1])} at bp: {ConSeq[length][0][0]}, VAF = {round((count/len(seqs))*100, 3)}%, Quality Score: {round((ConSeq[length][2])*100, 3)}% similar.\n")
+            f.write("\n")
+        for length, count in significant_lengths.items(): #This grabs example alignments for each of the significant lengths
+            target_seq = str(ConSeq[length][0][1:]).strip()  # Define target string
+            target = f"InDel = {target_seq}"
+            f.write(f"Target: {target}\n")
+            target_found = False  # Flag to track if target was found
+
+            # Open output_file2 for reading
+            with open(output_file2, 'r') as f2:
+                buffer = []  # Initialize a buffer to store lines
+
+                for line in f2:
+                    # Add the current line to the buffer
+                    buffer.append(line)
+                    logger.debug(line)
+
+                    # Check if the current line contains the target
+                    if target in line:
+                        target_found = True  # Set flag to True if target is found
+                        # Write the last 13 lines (12 previous + target line) to output_file1
+                        f.writelines(buffer[-13:])  # Get the last 13 lines
+                        break  
+
+            # If target was not found, write a message to output_file1
+            if not target_found:
+                f.write(f"No exact match was located for target: {target}\n")
         # f.write(f"Final Consensus Sequence:\n")
         # f.write(f"Length: {len(FinalConSeq)-1}\nSequence: {FinalConSeq[1:]}\nInsertion Point: {avg_first_index} at {FinalConSeq[0]}\n")
         # f.write(f"Average Point of Insertion with respect to whole sequence: {TrueIndex}\n")
         # f.write(f"Final Score: {MSAscore}\n")
 
-        output_file = os.path.join(output_folder, f"{base_filename}_Ref-{Local_ID}_Out.csv")
-        logger.info(output_file)
 
         # create a new DataFrame with some data
-        newIndelDF = pd.DataFrame({
-        'Seqs': [filename],  # Make single values a list to match the expected structure
-        'Date': [current_date],
-        'Min_Length': [DelLenCut],
-        'Max_Length': [InsertMax],
-        "gap_open": [gap_open],
-        "gap_extend": [gap_extend],
-        "Exclusion_Threshild": [f"{exclusion_threshold * 100}%"],
-        "Gene": [Gene],
-        "Chromosome": [chr],
-        "Global_Location": [Global_bp],
-        "Reference_seq": [Ref_Seq],
-        "seqFileName": [filename],
-        "Num_InDels": [len(DelList)],
-        "Num_seqs": [len(seqs)],
-        "Con_Seq_Lengths": [list(significant_lengths.keys())],  # Convert dict keys to list
-        "Con_Seq_Counts": [list(significant_lengths.values())],  # Convert dict values to list
-        "VAF": [VAF],
-        "Con_Seq": [str({key-1: value[0][1:] for key, value in ConSeq.items()})],
-        "Con_Seq_Index": [str({key-1: round(value[1]) for key, value in ConSeq.items()})],  # Store as string or list if needed
-        "Con_Seq_bp": [str({key-1: value[0][0] for key, value in ConSeq.items()})],
-        "Con_Seq_VAF": [str({key-1: round((value / len(seqs)) * 100, 3) for key, value in significant_lengths.items()})],
-        "Con_Seq_QS": [str({key-1: round(value[2] * 100, 3) for key, value in ConSeq.items()})],
-    })
+        newIndelDF = pd.DataFrame()
+        # Loop through each ConSeq item (each represents a unique consensus sequence)
+        for key, value in ConSeq.items():
+            # Create a row for each Con_Seq
+            row = {
+                'Seqs': filename,  # Make single values a list to match the expected structure
+                'Date': current_date,
+                'Del/Ins': status,
+                'Min_Length': DelLenCut,
+                'Max_Length': InsertMax,
+                "gap_open": gap_open,
+                "gap_extend": gap_extend,
+                "Exclusion_Threshild": f"{exclusion * 100}%",
+                "Gene": Gene,
+                "Amp_ID": Amp_ID,
+                "Chromosome": chr,
+                "Global_Location": Global_bp,
+                "Reference_seq": Ref_Seq,
+                "Num_InDels": len(DelList),
+                "Num_seqs": len(seqs),
+                "Con_Seq_Lengths": key-1,  # The current length
+                "Con_Seq_Counts": significant_lengths[key],  # The count of this specific length
+                "VAF": VAF,
+                "Con_Seq": value[0][1:],  # The consensus sequence without the first character
+                "Con_Seq_Index": round(value[1]),  # The insertion index for the consensus sequence
+                "Con_Seq_bp": value[0][0],  # The bp (first character) for this consensus sequence
+                "Con_Seq_VAF": round((significant_lengths[key] / len(seqs)) * 100, 3),  # VAF for the consensus
+                "Con_Seq_QS": round(value[2] * 100, 3),  # Quality Score for the consensus sequence
+            }
+            
+            # Append the row to the DataFrame
+            newIndelDF = pd.concat([newIndelDF, pd.DataFrame([row])], ignore_index=True)
 
-        return(newIndelDF)
-    
+        return newIndelDF
 
-def load_scoring_matrice(scoringdatafile):
+
+'''
+From Original script, not modified
+- NP 8/22/24
+'''
+def load_scoring_matrice(scoringdatafile): #Untouched by NP, loads in Nuc.4.4 scoring matrix
     """
     Need to create scoring matrices for nwalign and for swalign
     
@@ -197,6 +255,9 @@ def load_scoring_matrice(scoringdatafile):
     
     return(nuc44)
 
+    
+
+
 
 
 
@@ -210,7 +271,7 @@ From NP, to be worked on in future
 def findDupeSeq(insertSeq, refSeq, nuc44, gap_open, gap_extend):
     circPermLength=len(insertSeq)
     #maxSWscore=swalign(insertSeq, insertSeq)[0] #get a reference best score
-    alignments =pairwise2.align.localds(insertSeq, insertSeq, nuc44, gap_open, gap_extend, one_alignment_only=True) #get a reference best score
+    alignments =pairwise2.align.globalds(insertSeq, insertSeq, nuc44, gap_open, gap_extend, one_alignment_only=True) #get a reference best score
     maxSWscore = alignments[0].score
     swScore=[]
     currInsertSeq=insertSeq
@@ -232,15 +293,73 @@ def findDupeSeq(insertSeq, refSeq, nuc44, gap_open, gap_extend):
 
 # This uses swalign and then finds the largest deleted sequence
 
-def findDeletionWithSW(seq1,seq2,nuc44, DelList, param, DelLenCut, InsertMax):
+def findDeletionWithSW(seq1,seq2,nuc44, DelList, param, DelLenCut, InsertMax, output_file2):
+    '''
+    Modified and integrated from WEC Script starting 7/6/2024
 
+    Input: Reference and Sample sequence, The DelList to store found Indels, Parameters, and full outputfile
+
+    Output: The first index of the deletion is returned, the sequence of the deletion in DelList, logged in output_file2
+    - NP 8/22/24
+    '''
+    """
+    Performs a global pairwise alignment between two sequences
+    using the NUC44 matrix and the Needleman-Wunsch algorithm
+    as implemented in Biopython. Returns the alignment, the sequence
+    identity ...
+    
+    
+    
+    https://biopython.org/docs/1.75/api/Bio.pairwise2.html    
+    from Bio import pairwise2
+    from Bio.pairwise2 import format_alignment
+    
+    
+    JoaoRodrigues/seq_align.py
+    https://gist.github.com/JoaoRodrigues/8c2f7d2fc5ae38fc9cb2    
+    Performs a global pairwise alignment between two sequences
+    using the BLOSUM62 matrix and the Needleman-Wunsch algorithm
+    as implemented in Biopython. Returns the alignment, the sequence
+    identity and the residue mapping between both original sequences.
+ 
+    
+    Algorithm:
+        1 - align seqA and SeqB; note SeqA should be the longer than SeqB so that the gaps "-" appear in SeqB
+        2 - from the list of deletions (i.e. consecutive "-"'s); note need to insure that the 5' ([i][0]) and 3' ([i][2]) 
+            are shorter than interstitial deletion ([i][1]).
+                - optimizing the amplicon reference sequence padding to avoid erroneous inserts and minimize the size of 5' and 3' deletions
+                - QC: check for three deletions and insure the [i][1] (interstitial, 2nd) is the largest
+        3 - optimum alignment should follow the HGVS 3' rule
+                - alignment 3?
+                - one_alignment_only=False
+                - coding strand issues?                
+                - Notes:
+                https://hgvs-nomenclature.org/stable/recommendations/DNA/deletion/
+                for all descriptions, the most 3' position possible of the reference sequence is arbitrarily assigned to have been changed (3'rule)
+                https://www.sophiagenetics.com/science-hub/hgvs-nomenclature/#:~:text=The%203%20prime%20rule%20for%20mutation%20nomenclature,this%20rule%20in%20Figure%202).
+        4 - obtain the details for the optimum alignment
+                - sequence
+                - position
+                    - amplicon
+                    - hg19 and hg38
+                - etc
+                    
+    Notes:
+        - adapted from findInsertsWithNW (John Spence, Jonathan Carroll-Nellenback)
+    
+    Questions:
+        - may be OK to use the 1st align rather than the 3' optimized alignment due to secondary, local alignment using Smith-Waterman algorithm  
+        
+    
+    
+    """
     #Request one of the best alignments using the scoring matrix nuc44, gapopen penalties of 20 and gap extend penalties of .5
     gap_open=param['nwalign_gap_open']
     gap_extend=param['nwalign_gap_extend']
      
     # https://biopython.org/docs/1.75/api/Bio.pairwise2.html
     one_align=True #Makes the output simpler
-    alignments = pairwise2.align.localds(seq1, seq2, nuc44, gap_open, gap_extend, one_alignment_only=one_align)
+    alignments = pairwise2.align.globalds(seq1, seq2, nuc44, gap_open, gap_extend, one_alignment_only=one_align) #This creates the alignment, DOES NOT STORE INDEL, that is done with DelList
     #print(f"parameters - gap_open: {gap_open}; gap_extend: {gap_extend}; one_aligment: {one_align} ")
     #alignments = pairwise2.align.globalms(seq1, seq2, matchScore, mismatchPenalty, gapOpen, gapExtend, one_alignment_only=one_align)
     #print(alignments)
@@ -257,35 +376,46 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, param, DelLenCut, InsertMax):
         logger.debug(f"start = {a.start}")
         logger.debug(f"end   = {a.end}")
         
-        seqNuc = a.seqA # seqNuc refers to the reference sequence
-        seqFind = a.seqB # seqFind refers to the sample sequence in which we expect the gap to occur
-        del_find = re.findall(r'(-+)', seqFind) # Locates all strings of multiple gaps connected together
+    with open(output_file2, 'a') as f:
+        f.write(f"seqRef  = {a.seqA}\n")   # seqRef refers to the reference sequence
+        f.write(f"seqSam  = {a.seqB}\n")    # seqSam refers to the sample sequence where we expect the gap to occur
+        f.write(f"score = {a.score}\n")
+
+
+        seqRef = a.seqA # seqRef refers to the reference sequence
+        seqSam = a.seqB # seqSam refers to the sample sequence in which we expect the gap to occur
+        del_find = re.findall(r'(-+)', seqSam) # Locates all strings of multiple gaps connected together
+        del_find_filtered = [gap for gap in del_find if not (seqSam.startswith(gap) or seqSam.endswith(gap))] # Filter to exclude gaps at the beginning or end
 
         # Added Catch to find seqs that don't have any deletions
-        if not del_find:
+        if not del_find_filtered:
             del_max = ''
             del_pos = 0
         else:
-            del_max = max(del_find, key=len) # Reports the gap of longest length, the targeted deletion sequence
-            del_pos = del_find.index(del_max) # Takes index of first gap location in gap span
+            del_max = max(del_find_filtered, key=len) # Reports the gap of longest length, the targeted deletion sequence
+            del_pos = del_find_filtered.index(del_max) # Takes index of first gap location in gap span
 
-        logger.debug(del_find)
+        logger.debug(del_find_filtered)
         logger.debug(f"{del_pos}, {del_max}")
         
+        with open(output_file2, 'a') as f:
+            f.write(f"{del_pos}, {del_max}\n")
+
         # The p.finditer() call returns an iterator of all matches to the regex "p" in regSeqA.  
         # This is then used in a list comprehension to build up a list of tuples where the first element 
         # is the starting index and the 2nd is the length of the match.
         if (del_max == ''):
             del_list = [(0, 0)]
         else:
-            del_list = [(m.start(),len(m.group())) for m in p.finditer(seqFind)] # Creates list of all deletions found in a sequence
+            del_list = [(m.start(),len(m.group())) for m in p.finditer(seqSam)] # Creates list of all deletions found in a sequence
         logger.debug(f"del_list: {del_list}")
-        
+        with open(output_file2, 'a') as f:
+            f.write(f"del_list: {del_list}\n")  
         # This finds the largest element of the list of tuples, keyed on the 2nd tuple-element (i.e. length)
         (start, length) = max(del_list,key=(lambda x:x[1]))
         #print(f"start = {start}; length = {length}")
-        indel_seq = seqNuc[start-1:start+length] # Forms the deletion sequence from starting point and length, and refers to reference sequence
-        if len(indel_seq) > DelLenCut and len(indel_seq) < InsertMax: # Crops both too short and too long:
+        indel_seq = seqRef[start-1:start+length] # Forms the deletion sequence from starting point and length, and refers to reference sequence
+        if (len(indel_seq) > DelLenCut and len(indel_seq) < InsertMax): # Crops both too short and too long:
             DelList.append((start, indel_seq)) #Adds all of the sequenced deletions that are longer than the cut off to a list, cut off may vary depending on consistency of results
         
         #print(f"indel_seq = {indel_seq}")
@@ -301,6 +431,7 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, param, DelLenCut, InsertMax):
     #print(f"seq1A = {seq1A}")
     #print(f"seq2A = {seq2A}")
 
+    # WEC - Trying to better understand this code and break it out, see above
     # And then we iterate through the matching groups and find their length and location, and return the longest match
     # Includes catch for when no deletion is found
     if (del_max == ''):
@@ -311,20 +442,56 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, param, DelLenCut, InsertMax):
   
     return (firstIndex, seq1A[firstIndex:firstIndex+length+1])
 
-DupCounter = 0 # Global variable to count duplications
-def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, param, DelLenCut, InsertMax):
+
+def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, param, DelLenCut, InsertMax, output_file2):
     '''
     Created from Deletion Script starting 8/8/2024
+    Modified and integrated from WEC Script starting 7/6/2024
+
+    Input: Reference and Sample sequence, The DelList to store found Indels, Parameters, and full outputfile
+
+    Output: The first index of the deletion is returned, the sequence of the deletion in DelList, logged in output_file2
     - NP 8/22/24
     '''
+    """
+    https://biopython.org/docs/1.75/api/Bio.pairwise2.html
     
+    from Bio import pairwise2
+    from Bio.pairwise2 import format_alignment
+    
+    for a in pairwise2.align.globalxx("ACCGT", "ACG"):
+        print(format_alignment(*a))
+    Original code commented out:
+    """
+    # #Request one of the best alignments using the scoring matrix nuc44, gapopen penalties of 20 and gap extend penalties of .5
+    # gap_open=param['nwalign_gap_open']
+    # gap_extend=param['nwalign_gap_extend']
+    # # https://biopython.org/docs/1.75/api/Bio.pairwise2.html
+    # alignments=pairwise2.align.localds(readSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=True)
+    # readSeqA=alignments[0][0]
+    # refSeqA=alignments[0][1]
+    
+    # logger.debug(f"gap_open = {gap_open}")
+    # logger.debug(f"gap_extend = {gap_extend}")
+
+    # print()
+    # logger.debug(f"readSeqA = {readSeqA}")
+    # logger.debug(f"refSeqA  = {refSeqA}")
+   
+    # #Now we build a regex that will find all of the consecutive "-"'s
+    # p=re.compile('(-+)')
+
+    # # And then we iterate through the matching groups and find their length and location, and return the longest match
+    # (firstIndex,length)=max([(m.start(),len(m.group())) for m in p.finditer(refSeqA)],key=(lambda x:x[1]))
+    # return (firstIndex, readSeqA[firstIndex:firstIndex+length])
+
     # Request one of the best alignments using the scoring matrix nuc44, gapopen penalties of 20 and gap extend penalties of .5
     gap_open=param['nwalign_gap_open']
     gap_extend=param['nwalign_gap_extend']
      
     # https://biopython.org/docs/1.75/api/Bio.pairwise2.html
     one_align=True #Makes the output simpler
-    alignments = pairwise2.align.localds(readSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=one_align) #Same alignment program as deletions
+    alignments = pairwise2.align.globalds(readSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=one_align) #Same alignment program as deletions
     #print(f"parameters - gap_open: {gap_open}; gap_extend: {gap_extend}; one_aligment: {one_align} ")
     #alignments = pairwise2.align.globalms(seq1, seq2, matchScore, mismatchPenalty, gapOpen, gapExtend, one_alignment_only=one_align)
     print()
@@ -335,45 +502,50 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, param, DelLenCut, InsertMax
         logger.debug('')
         logger.debug(f"alignment: {i}")
         logger.debug(f"RefSeq  = {a.seqA}")
-        logger.debug(f"ReadSeq  = {a.seqB}")
+        logger.debug(f"SamSeq  = {a.seqB}")
         logger.debug(f"score = {a.score}")
         
-        seqNuc = a.seqA # seqNuc refers to the reference sequence and where we expect the gaps to occur
-        seqFind = a.seqB # seqFind refers to the sample sequence, and where we expect the insert
-        del_find = re.findall(r'(-+)', seqNuc) #Finds the gaps in Reference sequence in the indup version
+    with open(output_file2, 'a') as f:
+        f.write(f"seqRef  = {a.seqA}\n")   # seqRef refers to the reference sequence and where we expect the gaps to occur
+        f.write(f"seqSam  = {a.seqB}\n")  # seqSam refers to the reference sequence and where we expect the gaps to occur
+        f.write(f"score = {a.score}\n")
+
+
+        seqRef = a.seqA # seqRef refers to the reference sequence and where we expect the gaps to occur
+        seqSam = a.seqB # seqSam refers to the sample sequence, and where we expect the insert
+        del_find = re.findall(r'(-+)', seqRef) #Finds the gaps in Reference sequence in the indup version
+        del_find_filtered = [gap for gap in del_find if not (seqRef.startswith(gap) or seqRef.endswith(gap))]  # Filter to exclude gaps at the beginning or end
 
         #Added Catch to find seqs that don't have any insertions
-        if not del_find:
+        if not del_find_filtered:
             del_max = ''
             del_pos = 0
         else:
-            del_max = max(del_find, key=len)
-            del_pos = del_find.index(del_max)
+            del_max = max(del_find_filtered, key=len)
+            del_pos = del_find_filtered.index(del_max)
 
-        logger.debug(del_find)
+        logger.debug(del_find_filtered)
         logger.debug(f"{del_pos}, {del_max}")
-        
+        with open(output_file2, 'a') as f:
+            f.write(f"{del_pos}, {del_max}\n")
         # The p.finditer() call returns an iterator of all matches to the regex "p" in regSeqA.  
         # This is then used in a list comprehension to build up a list of tuples where the first element 
         # is the starting index and the 2nd is the length of the match.
         if (del_max == ''): # Gives output in case of no insertions
             del_list = [(0, 0)]
         else:
-            del_list = [(m.start(),len(m.group())) for m in p.finditer(seqNuc)] #Creates insertion list
+            del_list = [(m.start(),len(m.group())) for m in p.finditer(seqRef)] #Creates insertion list
         logger.debug(f"del_list: {del_list}")
-        
+        with open(output_file2, 'a') as f:
+            f.write(f"del_list: {del_list}\n")
         # This finds the largest element of the list of tuples, keyed on the 2nd tuple-element (i.e. length)
         (start, length) = max(del_list,key=(lambda x:x[1]))
         #print(f"start = {start}; length = {length}")
         
-        indel_seq = seqFind[start-1:start+length]
+        indel_seq = seqSam[start-1:start+length]
         
 
         if len(indel_seq) > DelLenCut and len(indel_seq) < InsertMax: # Crops both too short and too long
-            global DupCounter
-            if seqFind.count(indel_seq) > 1: #Searches for exact duplications - NEED TO EDIT
-                print("Duplication Found!")
-                DupCounter += 1
             DelList.append((start, indel_seq)) #Adds all of the sequenced insertions that are longer than the cut off to a list
 
         #print(f"indel_seq = {indel_seq}")
@@ -382,14 +554,14 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, param, DelLenCut, InsertMax
     seq2A=alignments[0][1]
     
     #print()
-    #print(f"gap_open = {gap_open}")
+   # print(f"gap_open = {gap_open}")
     #print(f"gap_extend = {gap_extend}")
 
     print()
     #print(f"seq1A = {seq1A}")
     #print(f"seq2A = {seq2A}")
 
-
+    # WEC - Trying to better understand this code and break it out, see above
     # And then we iterate through the matching groups and find their length and location, and return the longest match
     ## Returns output in case of no Insertions
     if (del_max == ''):
@@ -399,36 +571,56 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, param, DelLenCut, InsertMax
     # Now includes the base before and after the deletion sequence
     return (firstIndex-1, seq2A[firstIndex:firstIndex+length+1])
 
-def AlignFunc(nuc44, seqRef, seqDel, DelList, Deletion, param,  DelLenCut, InsertMax):
+def AlignFunc(nuc44, seqRef, seqDel, DelList, Deletion, param,  DelLenCut, InsertMax, output_file2):
     '''
     Only slightly changed from original Align_kit function, for clarity purposes
-
+    This is the parent function that calls either the deletion or the insertion function, and writes to full log output file
     - NP 8/22/24
     '''
-
-    funct_name = sys._getframe(0).f_code.co_name
     
-    logger.debug("-------New Aligment--------")
+    # https://www.oreilly.com/library/view/python-cookbook/0596001673/ch14s08.html
+    funct_name = sys._getframe(0).f_code.co_name
+
+    with open(output_file2, 'a') as f:
+        f.write(f"Deletion?: {Deletion} run\n")
+        f.write("-------New Alignment--------\n")
+        f.write("\n")
+        f.write(f"function: {funct_name}\n")
+        f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Alignment Parameters: {param}\n")
+        f.write("\n")
+        f.write(f"seqRef = {seqRef}\n")
+        f.write(f"seqInDel = {seqDel}\n")
+        f.write("\n")
+
+    logger.debug("-------New Alignment--------")
     logger.debug(f"function: {funct_name}")
     
     print()
     logger.debug(f"seqRef = {seqRef}")
     logger.debug(f"seqInDel = {seqDel}")
     print()
+
     if Deletion == True:
-        firstIndex, readSeqA = findDeletionWithSW(seqRef, seqDel, nuc44, DelList, param,  DelLenCut, InsertMax)
+        firstIndex, readSeqA = findDeletionWithSW(seqRef, seqDel, nuc44, DelList, param,  DelLenCut, InsertMax, output_file2)
     else:
-        firstIndex, readSeqA = findInsertsWithSW(seqRef, seqDel, nuc44, DelList, param,  DelLenCut, InsertMax)
+        firstIndex, readSeqA = findInsertsWithSW(seqRef, seqDel, nuc44, DelList, param,  DelLenCut, InsertMax, output_file2)
     # Find the length of each sequence
-    global Amp_Data
+    global Amp_Data #Obsolete
     global seqRefUsed
-    indel_size = len(readSeqA)
+    indel_size = len(readSeqA[:-1])
         
     print()
     logger.debug(f"firstIndex = {firstIndex}")
     logger.debug(f"size = {indel_size}")
     logger.debug(f"readSeqA = {readSeqA}")
     print()
+
+    with open(output_file2, 'a') as f:
+        f.write(f"firstIndex = {firstIndex}\n")
+        f.write(f"size = {indel_size}\n")
+        f.write(f"InDel = {readSeqA[:-1]}\n")
+        f.write("\n")
+        
     return firstIndex, readSeqA
 
     
@@ -625,7 +817,7 @@ If there is only one consensus sequence, it sets MSAscore to "No MSA Done".
 def ConcensusInDel(DelList, Cutoff, exclusion_threshold): 
 
     if not DelList: #Catches runs with no inserts
-        return ""
+        return 0, 0, 0
 
     #MAKE DICTIONARY: {Key - Length : Value - [List of indices for each length]
     LengthDict = defaultdict(list)
@@ -662,13 +854,13 @@ def ConcensusInDel(DelList, Cutoff, exclusion_threshold):
         # Filter sequences of the current valid length
         # filtered_sequences = [seq[1] for seq in DelList if len(seq[1]) == length]
         filtered_sequences = list(map(lambda i: DelList[i][1], LengthDict[length]))
-        DeletionPoints = list(map(lambda i: DelList[i][0], LengthDict[length]))
+        DeletionPoints = list(map(lambda i: DelList[i][0], LengthDict[length])) #Start indel index
 
         if not filtered_sequences: 
             continue
 
         # Align sequences
-        alignments = pairwise2.align.globalms(filtered_sequences[0], filtered_sequences[0], 2, -1, -0.5, -0.1, one_alignment_only=True)
+        alignments = pairwise2.align.globalms(filtered_sequences[0], filtered_sequences[0], 2, -1, -0.5, -0.1, one_alignment_only=True) #align sequences to account for varying lengths for each lengths from clustering
         for seq in filtered_sequences[1:]:
             alignments = pairwise2.align.globalms(alignments[0][0], seq, 2, -1, -0.5, -0.1, one_alignment_only=True)
 
@@ -688,6 +880,8 @@ def ConcensusInDel(DelList, Cutoff, exclusion_threshold):
 
             else:
                 continue
+                logger.error("Base Counting Error")
+                raise RuntimeError("Base Counting Error")
                 #consensus_base = '-'  # Default to a gap if no bases are present
             consensus_sequence.append(consensus_base)
 
@@ -708,7 +902,7 @@ def ConcensusInDel(DelList, Cutoff, exclusion_threshold):
     #     final_consensus = next(iter(consensus_sequences.values()))
     #     MSAscore = "No MSA Done"
     #     return significant_lengths, consensus_sequences, final_consensus, MSAscore, DeletionPoints
-    
+
     return significant_lengths, consensus_sequences, AverageIndexLength
 
 '''
@@ -794,46 +988,35 @@ def multi_sequence_alignment(consensus_sequences): # Uses MSA to find final conc
     return final_consensus, stdout
 
 
-if __name__ == "__main__":
-    logger.remove()
-    logger.add(sys.stderr, level="DEBUG")
-    base_filename = "/base/"
-    d_output = "/Outputs/"
-    d_ampData = 'AmpData.xlsx'
-    d_params = 'Params.xlsx'
-    params_df = pd.read_excel(d_params)
-    ampData = pd.read_excel(d_ampData)
-    # Converting the parameters to a dictionary
-    params_dict = pd.Series(params_df.Value.values, index=params_df.Parameter).to_dict()
+def tsvArray(filename):
+    """
+    Extracts data from a TSV file with columns AmpID, head, and seq,
+    and groups entries by unique AmpID.
 
-    # Add a new handler that logs to stdout with level DEBUG
-    # This is the known deletions seqs
-    
-    files = ["3'end.fasta", 'negative_control.fasta']
-    
-    #This functions extract sequences from FASTA/FASTQ files into a list, and for each file in the list executes main program
-    IndelDF = pd.DataFrame()
-    for file in files:
-        filename = file
-        logger.info(filename)
-        if filename.lower().endswith('.fasta'):
-            fasta = fastaArray(filename)
-        elif filename.lower().endswith('.fastq'):
-            fasta = fastqArray(filename)
-        else:
-            logger.error("This is not a valid file")
-            
-        seqs = getSeqList(fasta)
+    - Arguments:
+        filename: The name of the TSV file to read from.
 
-        SeqList = seqs
+    - Returns:
+        A list of lists with the format [seqs, headers, amp_id] for each unique AmpID.
 
-        newIndelDF = main(params_dict, ampData, SeqList, base_filename, IndelDF)
-        IndelDF = pd.concat([IndelDF, newIndelDF])
-        logger.info(newIndelDF)
-        logger.info(IndelDF)
-    IndelDF.to_csv(d_output + 'IndelDF.tsv', sep='\t',index=False)
-    # pd.set_option('display.max_rows', None)  # Show all rows
-    # pd.set_option('display.max_columns', None)  # Show all columns
-    # print(IndelDF)  # or just `df` in a Jupyter notebook to display it
+    - NP 7/20/24
+    """
+    ampid_dict = defaultdict(lambda: {"headers": [], "seqs": []})
 
+    with open(filename, 'r') as tsvfile:
+        reader = csv.DictReader(tsvfile, delimiter='\t')
+        for row in reader:
+            # Extract the AmpID, head, and seq values from the row
+            amp_id = row.get('AmpID')
+            head = row.get('head')
+            seq = row.get('seq')
 
+            # Only add to dictionary if all fields are present
+            if amp_id and head and seq:
+                ampid_dict[amp_id]["headers"].append(head)
+                ampid_dict[amp_id]["seqs"].append(seq)
+
+    # Convert the dictionary to a list of lists with the format [seqs, headers, amp_id]
+    grouped_entries = [[info["seqs"], info["headers"], amp_id] for amp_id, info in ampid_dict.items()]
+
+    return grouped_entries
