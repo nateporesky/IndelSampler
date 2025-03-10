@@ -344,10 +344,42 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
         return newIndelDF
 
 
-'''
-From Original script, not modified
-- NP 8/22/24
-'''
+def AlignFunc(nuc44, seqRef, seqInDel, seqHeader, DelList, Deletion, gap_open, gap_extend,  DelLenCut, InsertMax, output_full):
+    '''
+    Only slightly changed from original Align_kit function, for clarity purposes
+    This is the parent function that calls either the deletion or the insertion function, and writes to full log output file
+    - NP 8/22/24
+    '''
+    
+    # https://www.oreilly.com/library/view/python-cookbook/0596001673/ch14s08.html
+    funct_name = sys._getframe(0).f_code.co_name
+
+    with open(output_full, 'a') as f:
+        f.write(f"Deletion?: {Deletion} run\n")
+        f.write("-------New Alignment--------\n")
+        f.write(f"Sequence Header: {seqHeader}\n")
+        f.write("\n")
+        f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Gap Open: {gap_open}, Gap Extend: {gap_extend}\n")
+        f.write("\n")
+        f.write(f"seqRef   = {seqRef}\n")
+        f.write(f"seqInDel = {seqInDel}\n")
+        f.write("\n")
+
+    if Deletion is True:
+        firstIndex, readSeqA = findDeletionWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
+    else:
+        firstIndex, readSeqA = findInsertsWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
+    # Find the length of each sequence
+    indel_size = len(readSeqA[:-1])
+        
+    with open(output_full, 'a') as f:
+        f.write(f"firstIndex = {firstIndex}\n")
+        f.write(f"size = {indel_size}\n")
+        f.write(f"InDel = {readSeqA[:-1]}\n")
+        f.write("\n")
+        
+    return firstIndex, readSeqA
+
 def load_scoring_matrice(scoringdatafile): #Untouched by NP, loads in Nuc.4.4 scoring matrix
     """
     Need to create scoring matrices for nwalign and for swalign
@@ -373,11 +405,6 @@ def load_scoring_matrice(scoringdatafile): #Untouched by NP, loads in Nuc.4.4 sc
     return(nuc44)
 
     
-
-
-
-
-
 '''
 This uses swalign and then finds the largest inserted sequence
 This finds the best cyclic permutation of the insertSeq against the refSeq, not currently used
@@ -385,30 +412,6 @@ From NP, to be worked on in future
 - NP 8/22/24
 '''
 
-def findDupeSeq(insertSeq, refSeq, nuc44, gap_open, gap_extend):
-    circPermLength=len(insertSeq)
-    #maxSWscore=swalign(insertSeq, insertSeq)[0] #get a reference best score
-    alignments = pairwise2.align.globalds(insertSeq, insertSeq, nuc44, gap_open, gap_extend, one_alignment_only=True) #get a reference best score
-    maxSWscore = alignments[0].score
-    swScore=[]
-    currInsertSeq=insertSeq
-    # Go through various cyclic permutations of insert seq and compare to refseq
-    for i in range(0,circPermLength):
-        swScore.append(pairwise2.align.localds(currInsertSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=True).score)
-        currInsertSeq=currInsertSeq[-1:]+currInsertSeq[:-1] # rotate insert sequence to the right
-
-    # Find optimal permutation
-    (bestScoreIndex,bestValue) = max(enumerate(swScore), key=(lambda x: x[1]))  
-    dupeSeq = insertSeq[-bestScoreIndex:]+insertSeq[:-bestScoreIndex]
-    
-    # Find score and start vector
-    [swScoreDupe,swStartDupe]=pairwise2.align.localds(dupeSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=True) 
-    dupeLength=len(insertSeq)
-    dupeStart=swStartDupe[1]-swStartDupe[0]+1+dupeLength
-    dupeRelScore=float(swScoreDupe)/float(maxSWscore)
-    return (dupeStart, dupeSeq, dupeRelScore, dupeLength)
-
-# This uses swalign and then finds the largest deleted sequence
 
 def findDeletionWithSW(seq1,seq2,nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full):
     '''
@@ -419,59 +422,7 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, gap_open, gap_extend, DelLenCut
     Output: The first index of the deletion is returned, the sequence of the deletion in DelList, logged in output_full
     - NP 8/22/24
     '''
-    """
-    Performs a global pairwise alignment between two sequences
-    using the NUC44 matrix and the Needleman-Wunsch algorithm
-    as implemented in Biopython. Returns the alignment, the sequence
-    identity ...
-    
-    
-    
-    https://biopython.org/docs/1.75/api/Bio.pairwise2.html    
-    from Bio import pairwise2
-    from Bio.pairwise2 import format_alignment
-    
-    
-    JoaoRodrigues/seq_align.py
-    https://gist.github.com/JoaoRodrigues/8c2f7d2fc5ae38fc9cb2    
-    Performs a global pairwise alignment between two sequences
-    using the BLOSUM62 matrix and the Needleman-Wunsch algorithm
-    as implemented in Biopython. Returns the alignment, the sequence
-    identity and the residue mapping between both original sequences.
- 
-    
-    Algorithm:
-        1 - align seqA and SeqB; note SeqA should be the longer than SeqB so that the gaps "-" appear in SeqB
-        2 - from the list of deletions (i.e. consecutive "-"'s); note need to insure that the 5' ([i][0]) and 3' ([i][2]) 
-            are shorter than interstitial deletion ([i][1]).
-                - optimizing the amplicon reference sequence padding to avoid erroneous inserts and minimize the size of 5' and 3' deletions
-                - QC: check for three deletions and insure the [i][1] (interstitial, 2nd) is the largest
-        3 - optimum alignment should follow the HGVS 3' rule
-                - alignment 3?
-                - one_alignment_only=False
-                - coding strand issues?                
-                - Notes:
-                https://hgvs-nomenclature.org/stable/recommendations/DNA/deletion/
-                for all descriptions, the most 3' position possible of the reference sequence is arbitrarily assigned to have been changed (3'rule)
-                https://www.sophiagenetics.com/science-hub/hgvs-nomenclature/#:~:text=The%203%20prime%20rule%20for%20mutation%20nomenclature,this%20rule%20in%20Figure%202).
-        4 - obtain the details for the optimum alignment
-                - sequence
-                - position
-                    - amplicon
-                    - hg19 and hg38
-                - etc
-                    
-    Notes:
-        - adapted from findInsertsWithNW (John Spence, Jonathan Carroll-Nellenback)
-    
-    Questions:
-        - may be OK to use the 1st align rather than the 3' optimized alignment due to secondary, local alignment using Smith-Waterman algorithm  
-        
-    
-    
-    """
-     
-    # https://biopython.org/docs/1.75/api/Bio.pairwise2.html
+   
     one_align=True #Makes the output simpler
     alignments = pairwise2.align.globalds(seq1, seq2, nuc44, gap_open, gap_extend, one_alignment_only=one_align) #This creates the alignment, DOES NOT STORE INDEL, that is done with DelList
     #print(f"parameters - gap_open: {gap_open}; gap_extend: {gap_extend}; one_aligment: {one_align} ")
@@ -547,13 +498,6 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLe
     Output: The first index of the deletion is returned, the sequence of the deletion in DelList, logged in output_full
     - NP 8/22/24
     '''
-    """
-    https://biopython.org/docs/1.75/api/Bio.pairwise2.html
-    
-\
-    """
-     
-    # https://biopython.org/docs/1.75/api/Bio.pairwise2.html
     one_align=True #Makes the output simpler
     alignments = pairwise2.align.globalds(readSeq, refSeq, nuc44, gap_open, gap_extend, one_alignment_only=one_align) #Same alignment program as deletions
     #print(f"parameters - gap_open: {gap_open}; gap_extend: {gap_extend}; one_aligment: {one_align} ")
@@ -620,126 +564,6 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLe
     # Now includes the base before and after the deletion sequence
     return (firstIndex-1, seq2A[firstIndex:firstIndex+length+1])
 
-def AlignFunc(nuc44, seqRef, seqInDel, seqHeader, DelList, Deletion, gap_open, gap_extend,  DelLenCut, InsertMax, output_full):
-    '''
-    Only slightly changed from original Align_kit function, for clarity purposes
-    This is the parent function that calls either the deletion or the insertion function, and writes to full log output file
-    - NP 8/22/24
-    '''
-    
-    # https://www.oreilly.com/library/view/python-cookbook/0596001673/ch14s08.html
-    funct_name = sys._getframe(0).f_code.co_name
-
-    with open(output_full, 'a') as f:
-        f.write(f"Deletion?: {Deletion} run\n")
-        f.write("-------New Alignment--------\n")
-        f.write(f"Sequence Header: {seqHeader}\n")
-        f.write("\n")
-        f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Gap Open: {gap_open}, Gap Extend: {gap_extend}\n")
-        f.write("\n")
-        f.write(f"seqRef   = {seqRef}\n")
-        f.write(f"seqInDel = {seqInDel}\n")
-        f.write("\n")
-
-    if Deletion is True:
-        firstIndex, readSeqA = findDeletionWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
-    else:
-        firstIndex, readSeqA = findInsertsWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
-    # Find the length of each sequence
-    indel_size = len(readSeqA[:-1])
-        
-    with open(output_full, 'a') as f:
-        f.write(f"firstIndex = {firstIndex}\n")
-        f.write(f"size = {indel_size}\n")
-        f.write(f"InDel = {readSeqA[:-1]}\n")
-        f.write("\n")
-        
-    return firstIndex, readSeqA
-
-    
-    
-
-def fastaArray(filename, max_lines=15000): # can change max_lines to determine how many seqs you would like to process
-    '''
-    Creates a fasta formated array with all of the headers and their respective seuqences from a Fasta File
-
-    - NP 7/20/24
-    '''
-    fasta = open(filename, 'r')
-    entries = []  # empty list to store (header, sequence) tuples
-    header = ''  # initialize header
-    seq = ''  # initialize sequence
-    line_count = 0  # track the number of lines read
-
-    for line in fasta:
-        line = line.strip()
-        line_count += 1
-
-        if line.startswith('>'):
-            if header:  # check if header is not empty (not the first header)
-                entries.append((header, seq))
-            header = line[1:]
-            seq = ''
-        else:
-            seq += line
-
-        if line_count >= max_lines:
-            break
-
-    if header:
-        entries.append((header, seq))
-
-    return entries
-
-def fastqArray(filename):
-    '''
-    Creates a fasta formated array with all of the headers and their respective sequences from any fastq-ish formatted file
-    -No max_lines
-
-    - NP 8/4/24
-    '''
-    valid_bases = {'A', 'T', 'C', 'G', 'N'}
-    with open(filename, 'r') as fasta:
-        entries = []  # List to store (header, sequence) tuples
-        header = ''   # Initialize header
-        seq = ''      # Initialize sequence
-        expecting_sequence = False  # Flag to track if the next line should be a sequence
-
-        for line in fasta:
-            line = line.strip()  # Remove leading/trailing whitespace
-
-            if line.startswith('@'):
-                if header and seq:  # If there's an existing entry, save it
-                    entries.append((header, seq))
-                header = line[1:]  # Update header (remove '@')
-                seq = ''           # Reset sequence for new entry
-                expecting_sequence = True  # Expect a sequence line next
-
-            elif expecting_sequence:
-                # Process the sequence line if it's the immediate line after '@'
-                if all(base in valid_bases for base in line):
-                    seq = line  # Only take this line as the sequence
-                else:
-                    # If there are invalid characters, log a warning
-                    print(f"Warning: Invalid characters found in sequence line: {line}")
-                expecting_sequence = False  # Reset flag as we've processed the sequence
-
-        # Append the last entry if any
-        if header and seq:
-            entries.append((header, seq))
-
-    return entries
-
-def getSeqList(fasta):
-    '''
-    Small mini function that pairs with fasta and fastq function lists
-    - NP 7/20/24
-    '''
-    seqs = []
-    for entry in fasta:
-        seqs.append(entry[1])
-        # Now 'sequence' contains the sequence corresponding to the current entry
-    return seqs
 
 
 def clusterLengths(numDataSort, lenDataSort): 
@@ -777,12 +601,12 @@ This function is useful for clustering sequences that are close in length and ag
         (numSortIndex, numDataSort) = (list(t) for t in zip(*sorted(enumerate(numDataSort), key=lambda x: x[1], reverse=True)))
         lenDataSort = [lenDataSort[i] for i in numSortIndex]
         for iSort in range(0, len(numDataSort)):
-            thisLen = lenDataSort[iSort]
-            thisNum = numDataSort[iSort]
-            if thisNum > 0:
+            Len = lenDataSort[iSort]
+            Num = numDataSort[iSort]
+            if Num > 0:
                 for j in [-i, i]:
                     # look to the left and right
-                    leftLen = thisLen + j
+                    leftLen = Len + j
                     leftIndex = next((x[0] for x in enumerate(lenDataSort) if x[1] == leftLen), None)
                     if leftIndex:
                         leftNum = numDataSort[leftIndex]
@@ -1054,6 +878,88 @@ def tsvArray(filename):
 
     return grouped_entries
 
+def fastaArray(filename, max_lines=15000): # can change max_lines to determine how many seqs you would like to process
+    '''
+    Creates a fasta formated array with all of the headers and their respective seuqences from a Fasta File
+
+    - NP 7/20/24
+    '''
+    fasta = open(filename, 'r')
+    entries = []  # empty list to store (header, sequence) tuples
+    header = ''  # initialize header
+    seq = ''  # initialize sequence
+    line_count = 0  # track the number of lines read
+
+    for line in fasta:
+        line = line.strip()
+        line_count += 1
+
+        if line.startswith('>'):
+            if header:  # check if header is not empty (not the first header)
+                entries.append((header, seq))
+            header = line[1:]
+            seq = ''
+        else:
+            seq += line
+
+        if line_count >= max_lines:
+            break
+
+    if header:
+        entries.append((header, seq))
+
+    return entries
+
+def fastqArray(filename):
+    '''
+    Creates a fasta formated array with all of the headers and their respective sequences from any fastq-ish formatted file
+    -No max_lines
+
+    - NP 8/4/24
+    '''
+    valid_bases = {'A', 'T', 'C', 'G', 'N'}
+    with open(filename, 'r') as fasta:
+        entries = []  # List to store (header, sequence) tuples
+        header = ''   # Initialize header
+        seq = ''      # Initialize sequence
+        expecting_sequence = False  # Flag to track if the next line should be a sequence
+
+        for line in fasta:
+            line = line.strip()  # Remove leading/trailing whitespace
+
+            if line.startswith('@'):
+                if header and seq:  # If there's an existing entry, save it
+                    entries.append((header, seq))
+                header = line[1:]  # Update header (remove '@')
+                seq = ''           # Reset sequence for new entry
+                expecting_sequence = True  # Expect a sequence line next
+
+            elif expecting_sequence:
+                # Process the sequence line if it's the immediate line after '@'
+                if all(base in valid_bases for base in line):
+                    seq = line  # Only take this line as the sequence
+                else:
+                    # If there are invalid characters, log a warning
+                    print(f"Warning: Invalid characters found in sequence line: {line}")
+                expecting_sequence = False  # Reset flag as we've processed the sequence
+
+        # Append the last entry if any
+        if header and seq:
+            entries.append((header, seq))
+
+    return entries
+
+def getSeqList(fasta):
+    '''
+    Small mini function that pairs with fasta and fastq function lists
+    - NP 7/20/24
+    '''
+    seqs = []
+    for entry in fasta:
+        seqs.append(entry[1])
+        # Now 'sequence' contains the sequence corresponding to the current entry
+    return seqs
+
 '''
 Notes for future use:
 MUST CHANGE: All paths used to access files, including scoring matrix (found in main), sequence files, 
@@ -1098,3 +1004,5 @@ if __name__ == "__main__":
     ]
 
     main(files, d_output, d_scoreMatrix, d_ampData) 
+
+
