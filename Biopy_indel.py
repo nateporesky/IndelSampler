@@ -89,17 +89,17 @@ def main(files, d_output, d_scoreMatrix, d_ampData):
                     output_full = d_output / f"{filename}_indelRunFull.txt" #filename used to save unique full output
 
                     with open(output_sum, 'w') as f:
-                        f.write(f"File Ran: {filename}\n")
+                        f.write(f"File Ran: {AmpID}_{status_text} {Path(file).name}\n")
                     
                     with open(output_full, 'w') as f:
-                        f.write(f"File Ran: {filename}\n")
+                        f.write(f"File Ran: {AmpID}_{status_text} {Path(file).name}\n")
 
                     newIndelDF = findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full)
 
                     IndelDF = pd.concat([IndelDF, newIndelDF])
                     logger.info(newIndelDF)
                     logger.info(IndelDF)
-            IndelDF.to_csv(d_output / f'{Path(file).name}_IndelDF.tsv', sep='\t',index=False) #Save the complete IndelDF to a .tsv file
+            IndelDF.to_csv(d_output / f'{AmpID}_IndelDF.tsv', sep='\t',index=False) #Save the complete IndelDF to a .tsv file
 
 
         elif isinstance(file, tuple) and file[0].lower().endswith('.fasta'): #This is the old workflow
@@ -175,8 +175,6 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
     hg19s = amp_dict["hg19s"] #Used in output
 
     status = "Deletion" if Deletion is True else "Insertion" #Used in to tell Alignfunc which to run and output
-    print(status)
-    print(type(Deletion))
 
     #Change for address of NUC.4.4
     scoringdatafile = amp_dict['scoreMatrix']
@@ -201,10 +199,10 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
     # Add in function to collect and then loop through more Reference sequences, currently hard coded in
     logger.info(f"Exclusion Threshold used: {exclusion * 100}%")
     for i in range(len(AmpID_DF)):  # Loops through all of the sample sequences, for each Reference sequence
-        seqInDel = AmpID_DF.loc[i, 'seq']
+        seqSam = AmpID_DF.loc[i, 'seq']
         seqHeader = AmpID_DF.loc[i, 'head']
-        firstIndex, DeletionSeq = AlignFunc(nuc44, seqRef, seqInDel, seqHeader, DelList, Deletion, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
-        IndexList.append(firstIndex)
+        refIndex, Indel = AlignFunc(nuc44, seqRef, seqSam, seqHeader, DelList, Deletion, gap_open, gap_extend, DelLenCut, InsertMax, hg19s, output_full)
+        IndexList.append(refIndex)
 
     # significant_lengths, ConSeq, FinalConSeq, MSAscore, DeletionPoints = ConcensusDel(DelList, Cutoff, exclusion_threshold)  # Creates consensus seq
     significant_lengths, ConSeq, AverageIndexLength = ConcensusInDel(DelList, Cutoff, exclusion)  # Creates consensus seq
@@ -220,7 +218,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
                 "Gene": gene,
                 "Amp_ID": amp_id,
                 "Chromosome": chr,
-                "Global_Location": hg19s,
+                "Global_Seq_Location": hg19s,
                 "Reference_seq": seqRef,
                 "Num_InDels": [0],
                 "Num_seqs": len(AmpID_DF),
@@ -229,6 +227,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
                 "VAF": [0], # VAF for all InDels Detected
                 "Con_Seq": [0],  # The consensus sequence without the first character
                 "Con_Seq_Index": [0],  # The insertion index for the consensus sequence
+                "Global_Indel_Position": [0],
                 "Con_Seq_bp": [0],  # The bp (first character) for this consensus sequence
                 "Con_Seq_VAF": [0],  # VAF for the consensus
                 "Con_Seq_QS": [0],  # Quality Score for the consensus sequence
@@ -266,7 +265,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
     with open(output_sum, 'a') as f: #Output Summary File
         f.write(f"{status} run\n")
         f.write(f"Results: {current_date}\n")
-        f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Gap Open: {gap_open}, Gap Extend: {gap_extend}\n")
+        f.write(f"Alignment Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Gap Open: {gap_open}, Gap Extend: {gap_extend}\n")
         f.write(f"Exclusion Threshold used: {exclusion * 100}%\n")
         f.write(f"Reference Sequence Used: {gene}, {chr}, {hg19s}, {seqRef}\n")
         f.write(f"Sample Data Used: {filename}\n")
@@ -275,12 +274,12 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
         
         f.write(f"The InDel Sequences:\n")
         for length, count in significant_lengths.items():
-            f.write(f"Length: {length-1}, Count: {count}, InDel Sequence: {ConSeq[length][0][1:]}\nAt Index: {round(ConSeq[length][1])} at bp: {ConSeq[length][0][0]}, VAF = {round((count/len(AmpID_DF))*100, 3)}%, Quality Score: {round((ConSeq[length][2])*100, 3)}% similar.\n")
+            f.write(f"Length: {length-1}, Count: {count}, InDel Sequence: {ConSeq[length][0][1:]}\nAt Index: {round(ConSeq[length][1])}, at hg19s Position: {round(ConSeq[length][1]) + hg19s - 1} at bp: {ConSeq[length][0][0]}, VAF = {round((count/len(AmpID_DF))*100, 3)}%, Quality Score: {round((ConSeq[length][2])*100, 3)}% similar.\n")
             f.write("\n")
         for length, count in significant_lengths.items(): #This grabs example alignments for each of the significant lengths
             target_seq = str(ConSeq[length][0][1:]).strip()  # Define target string
-            target = f"InDel = {target_seq}"
-            f.write(f"Target: {target}\n")
+            target = f"InDel = {target_seq}\n"
+            f.write(f"Consensus Alignment for: {target}\n")
             target_found = False  # Flag to track if target was found
 
             # Open output_full for reading
@@ -324,7 +323,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
                 "Gene": gene,
                 "Amp_ID": amp_id,
                 "Chromosome": chr,
-                "Global_Location": hg19s,
+                "Global_Seq_Location": hg19s,
                 "Reference_seq": seqRef,
                 "Num_InDels": len(DelList),
                 "Num_seqs": len(AmpID_DF),
@@ -333,6 +332,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
                 "VAF": VAF,
                 "Con_Seq": value[0][1:],  # The consensus sequence without the first character
                 "Con_Seq_Index": round(value[1]),  # The insertion index for the consensus sequence
+                "Global_Indel_Position": hg19s + round(value[1]) - 1,
                 "Con_Seq_bp": value[0][0],  # The bp (first character) for this consensus sequence
                 "Con_Seq_VAF": round((significant_lengths[key]) / len(AmpID_DF) * 100, 3),  # VAF for the consensus
                 "Con_Seq_QS": round(value[2] * 100, 3),  # Quality Score for the consensus sequence
@@ -344,7 +344,7 @@ def findIndel(amp_dict, AmpID_DF, filename, output_sum, output_full):
         return newIndelDF
 
 
-def AlignFunc(nuc44, seqRef, seqInDel, seqHeader, DelList, Deletion, gap_open, gap_extend,  DelLenCut, InsertMax, output_full):
+def AlignFunc(nuc44, seqRef, seqSam, seqHeader, DelList, Deletion, gap_open, gap_extend,  DelLenCut, InsertMax, hg19s, output_full):
     '''
     Only slightly changed from original Align_kit function, for clarity purposes
     This is the parent function that calls either the deletion or the insertion function, and writes to full log output file
@@ -361,24 +361,25 @@ def AlignFunc(nuc44, seqRef, seqInDel, seqHeader, DelList, Deletion, gap_open, g
         f.write("\n")
         f.write(f"Parameters used: Length Cutoffs: Min: {DelLenCut}, Max: {InsertMax}, Gap Open: {gap_open}, Gap Extend: {gap_extend}\n")
         f.write("\n")
-        f.write(f"seqRef   = {seqRef}\n")
-        f.write(f"seqInDel = {seqInDel}\n")
+        f.write(f"seqRef = {seqRef}\n")
+        f.write(f"seqSam = {seqSam}\n")
         f.write("\n")
 
     if Deletion is True:
-        firstIndex, readSeqA = findDeletionWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
+        refIndex, Indel = findDeletionWithSW(seqRef, seqSam, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
     else:
-        firstIndex, readSeqA = findInsertsWithSW(seqRef, seqInDel, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
+        refIndex, Indel = findInsertsWithSW(seqRef, seqSam, nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full)
     # Find the length of each sequence
-    indel_size = len(readSeqA[:-1])
+    indel_size = len(Indel)
         
     with open(output_full, 'a') as f:
-        f.write(f"firstIndex = {firstIndex}\n")
+        f.write(f"refIndex = {refIndex}\n")
+        f.write(f"hg19s Pos = {hg19s + refIndex - 1}\n")
         f.write(f"size = {indel_size}\n")
-        f.write(f"InDel = {readSeqA[:-1]}\n")
+        f.write(f"InDel = {Indel}\n")
         f.write("\n")
         
-    return firstIndex, readSeqA
+    return refIndex, Indel
 
 def load_scoring_matrice(scoringdatafile): #Untouched by NP, loads in Nuc.4.4 scoring matrix
     """
@@ -435,8 +436,8 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, gap_open, gap_extend, DelLenCut
         pass  # Keeps the loop running without extra logging
         
     with open(output_full, 'a') as f:
-        f.write(f"seqRef    = {a.seqA}\n")   # seqRef refers to the reference sequence
-        f.write(f"seqInDel  = {a.seqB}\n")    # seqSam refers to the sample sequence where we expect the gap to occur
+        f.write(f"seqRef  = {a.seqA}\n")   # seqRef refers to the reference sequence
+        f.write(f"seqSam  = {a.seqB}\n")    # seqSam refers to the sample sequence where we expect the gap to occur
         f.write(f"score = {a.score}\n")
 
 
@@ -470,9 +471,9 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, gap_open, gap_extend, DelLenCut
         #print(f"start = {start}; length = {length}")
         indel_seq = seqRef[start-1:start+length] # Forms the deletion sequence from starting point and length, and refers to reference sequence
         if (len(indel_seq) > DelLenCut and len(indel_seq) < InsertMax): # Crops both too short and too long:
-            DelList.append((start, indel_seq)) #Adds all of the sequenced deletions that are longer than the cut off to a list, cut off may vary depending on consistency of results
+            refIndex = sum(1 for i in range(start) if seqRef[i] != '-')  # Count only non-gap positions
+            DelList.append((refIndex, indel_seq)) #Adds all of the sequenced deletions that are longer than the cut off to a list, cut off may vary depending on consistency of results
         
-        #print(f"indel_seq = {indel_seq}")
     
     seq1A=alignments[0][0]
     seq2A=alignments[0][1]
@@ -484,8 +485,12 @@ def findDeletionWithSW(seq1,seq2,nuc44, DelList, gap_open, gap_extend, DelLenCut
     else:
         (firstIndex, length) = max([(m.start(), len(m.group())) for m in p.finditer(seq2A)], key=(lambda x: x[1])) # Searches for longest deletion in list
     #Now includes the base before and after the deletion sequence
+
+    # Convert firstIndex (which is based on seqSam) to refIndex (which is based on seqRef)
+    refIndex = sum(1 for i in range(firstIndex) if seqRef[i] != '-')  # Count only non-gap positions
+
   
-    return (firstIndex, seq1A[firstIndex:firstIndex+length+1])
+    return (refIndex, seq1A[firstIndex:firstIndex+length])
 
 
 def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLenCut, InsertMax, output_full):
@@ -510,8 +515,8 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLe
 
         
     with open(output_full, 'a') as f:
-        f.write(f"seqRef    = {a.seqA}\n")   # seqRef refers to the reference sequence and where we expect the gaps to occur
-        f.write(f"seqIndel  = {a.seqB}\n")  # seqSam refers to the reference sequence and where we expect the gaps to occur
+        f.write(f"seqRef  = {a.seqA}\n")   # seqRef refers to the reference sequence and where we expect the gaps to occur
+        f.write(f"seqSam  = {a.seqB}\n")  # seqSam refers to the reference sequence and where we expect the gaps to occur
         f.write(f"score = {a.score}\n")
 
 
@@ -548,8 +553,9 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLe
         
 
         if len(indel_seq) > DelLenCut and len(indel_seq) < InsertMax: # Crops both too short and too long
-            DelList.append((start, indel_seq)) #Adds all of the sequenced insertions that are longer than the cut off to a list
-
+            refIndex = sum(1 for i in range(start) if seqRef[i] != '-')  # Count only non-gap positions
+            DelList.append((refIndex, indel_seq)) #Adds all of the sequenced deletions that are longer than the cut off to a list, cut off may vary depending on consistency of results
+        
     
     seq1A=alignments[0][0]
     seq2A=alignments[0][1]
@@ -561,8 +567,13 @@ def findInsertsWithSW(readSeq,refSeq,nuc44, DelList, gap_open, gap_extend, DelLe
         return (0, "")
     else:
         (firstIndex, length) = max([(m.start(), len(m.group())) for m in p.finditer(seq1A)], key=(lambda x: x[1])) 
-    # Now includes the base before and after the deletion sequence
-    return (firstIndex-1, seq2A[firstIndex:firstIndex+length+1])
+
+    # Convert firstIndex (which is based on seqSam) to refIndex (which is based on seqRef)
+    refIndex = sum(1 for i in range(firstIndex) if seqRef[i] != '-')  # Count only non-gap positions
+
+  
+    return (refIndex, seq2A[firstIndex:firstIndex+length])
+
 
 
 
@@ -986,21 +997,22 @@ if __name__ == "__main__":
     files = [
         
 
-        #("/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/KIT63/2090-21_3p_TCCTTATGATCAC.fasta", 4) #KIT63
+         #KIT63
 
 
         #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/KIT63/691-21_K6058846_AmpData_indelana_seqs.tsv",
         #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1418-22_L9085915_AmpData_indelana_seqs.tsv",
         #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1910-21_K807B845_AmpData_indelana_seqs.tsv",
-        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/MET/3606-23_CAP_AmpData_indelana_seqs.tsv", #MET
+        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/MET/3606-23_CAP_AmpData_indelana_seqs.tsv" #MET
 
-        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/150-22_AmpData_indelana_seqs.tsv" #FLT3
-        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/1912-21_AmpData_indelana_seqs.tsv" #FLT3
+        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/150-22_AmpData_indelana_seqs.tsv", #FLT3
+        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/1912-21_AmpData_indelana_seqs.tsv", #FLT3
         #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/2336-21_AmpData_indelana_seqs.tsv" #FLT3
+        "/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/FLT3-ITD-oma/1416-25_P5011208_AmpData_indelana_seqs.tsv" #FLT3 Dr. Cox
 
-        "/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/239-23_M9115772_AmpData_indelana_seqs.tsv" #EGFR
-        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1418-22_L9085915_AmpData_indelana_seqs.tsv" #EGFR
-        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1910-21_K807B845_AmpData_indelana_seqs.tsv" #EGFR
+        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/239-23_M9115772_AmpData_indelana_seqs.tsv", #EGFR
+        #"/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1418-22_L9085915_AmpData_indelana_seqs.tsv", #EGFR
+        # "/Users/nateporesky/Library/CloudStorage/Box-Box/GNX/GNXpipe_v2/data/EGFR/1910-21_K807B845_AmpData_indelana_seqs.tsv" #EGFR
     ]
 
     main(files, d_output, d_scoreMatrix, d_ampData) 
